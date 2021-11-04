@@ -29,124 +29,99 @@
 
 #include "tusb_option.h"
 
+#include "synopsys_common.h"
+
+#include "broadcom/interrupts.h"
+
 // Since TinyUSB doesn't use SOF for now, and this interrupt too often (1ms interval)
 // We disable SOF for now until needed later on
 #define USE_SOF     0
 
-#if defined (STM32F105x8) || defined (STM32F105xB) || defined (STM32F105xC) || \
-    defined (STM32F107xB) || defined (STM32F107xC)
-#define STM32F1_SYNOPSYS
-#endif
+#if TUSB_OPT_DEVICE_ENABLED &&         \
+    (CFG_TUSB_MCU == OPT_MCU_BCM2711 ) \
 
-#if defined (STM32L475xx) || defined (STM32L476xx) ||                          \
-    defined (STM32L485xx) || defined (STM32L486xx) || defined (STM32L496xx) || \
-    defined (STM32L4R5xx) || defined (STM32L4R7xx) || defined (STM32L4R9xx) || \
-    defined (STM32L4S5xx) || defined (STM32L4S7xx) || defined (STM32L4S9xx)
-#define STM32L4_SYNOPSYS
-#endif
-
-#if TUSB_OPT_DEVICE_ENABLED &&                                          \
-    ( (CFG_TUSB_MCU == OPT_MCU_STM32F1 && defined(STM32F1_SYNOPSYS)) || \
-       CFG_TUSB_MCU == OPT_MCU_STM32F2                               || \
-       CFG_TUSB_MCU == OPT_MCU_STM32F4                               || \
-       CFG_TUSB_MCU == OPT_MCU_STM32F7                               || \
-       CFG_TUSB_MCU == OPT_MCU_STM32H7                               || \
-      (CFG_TUSB_MCU == OPT_MCU_STM32L4 && defined(STM32L4_SYNOPSYS)  || \
-       CFG_TUSB_MCU == OPT_MCU_GD32VF103 )                           \
-    )
 
 // EP_MAX       : Max number of bi-directional endpoints including EP0
 // EP_FIFO_SIZE : Size of dedicated USB SRAM
-#if CFG_TUSB_MCU == OPT_MCU_STM32F1
-#include "stm32f1xx.h"
-#define EP_MAX_FS       4
-#define EP_FIFO_SIZE_FS 1280
-
-#elif CFG_TUSB_MCU == OPT_MCU_STM32F2
-#include "stm32f2xx.h"
-#define EP_MAX_FS       USB_OTG_FS_MAX_IN_ENDPOINTS
-#define EP_FIFO_SIZE_FS USB_OTG_FS_TOTAL_FIFO_SIZE
-
-#elif CFG_TUSB_MCU == OPT_MCU_STM32F4
-#include "stm32f4xx.h"
-#define EP_MAX_FS       USB_OTG_FS_MAX_IN_ENDPOINTS
-#define EP_FIFO_SIZE_FS USB_OTG_FS_TOTAL_FIFO_SIZE
-#define EP_MAX_HS       USB_OTG_HS_MAX_IN_ENDPOINTS
-#define EP_FIFO_SIZE_HS USB_OTG_HS_TOTAL_FIFO_SIZE
-
-#elif CFG_TUSB_MCU == OPT_MCU_STM32H7
-#include "stm32h7xx.h"
-#define EP_MAX_FS       9
+#if CFG_TUSB_MCU == OPT_MCU_BCM2711
+// #include "bcm2711.h"
+#define EP_MAX_FS       8
 #define EP_FIFO_SIZE_FS 4096
-#define EP_MAX_HS       9
+#define EP_MAX_HS       8
 #define EP_FIFO_SIZE_HS 4096
-
-#elif CFG_TUSB_MCU == OPT_MCU_STM32F7
-#include "stm32f7xx.h"
-#define EP_MAX_FS       6
-#define EP_FIFO_SIZE_FS 1280
-#define EP_MAX_HS       9
-#define EP_FIFO_SIZE_HS 4096
-
-#elif CFG_TUSB_MCU == OPT_MCU_STM32L4
-#include "stm32l4xx.h"
-#define EP_MAX_FS       6
-#define EP_FIFO_SIZE_FS 1280
-
-#elif CFG_TUSB_MCU == OPT_MCU_GD32VF103
-#include "synopsys_common.h"
-
-// for remote wakeup delay
-#define __NOP()   __asm volatile ("nop")
-
-// These numbers are the same for the whole GD32VF103 family.
-#define OTG_FS_IRQn     86
-#define EP_MAX_FS       4
-#define EP_FIFO_SIZE_FS 1280
-
-// The GD32VF103 is a RISC-V MCU, which implements the ECLIC Core-Local
-// Interrupt Controller by Nuclei. It is nearly API compatible to the
-// NVIC used by ARM MCUs.
-#define ECLIC_INTERRUPT_ENABLE_BASE 0xD2001001UL
-
-#define NVIC_EnableIRQ __eclic_enable_interrupt
-#define NVIC_DisableIRQ __eclic_disable_interrupt
-
-static inline void __eclic_enable_interrupt (uint32_t irq) {
-  *(volatile uint8_t*)(ECLIC_INTERRUPT_ENABLE_BASE + (irq * 4)) = 1;
-}
-
-static inline void __eclic_disable_interrupt (uint32_t irq){
-  *(volatile uint8_t*)(ECLIC_INTERRUPT_ENABLE_BASE + (irq * 4)) = 0;
-}
-
 #else
 #error "Unsupported MCUs"
 #endif
 
+#define EP_MAX 8
+#define EP_FIFO_SIZE 4096
+
+// Info on values here: https://github.com/torvalds/linux/blob/79160a603bdb51916226caf4a6616cc4e1c58a58/Documentation/devicetree/bindings/usb/dwc2.yaml
+
+// From: https://github.com/raspberrypi/linux/blob/rpi-5.10.y/arch/arm/boot/dts/bcm283x.dtsi
+// usb: usb@7e980000 {
+//   compatible = "brcm,bcm2835-usb";
+//   reg = <0x7e980000 0x10000>;
+//   interrupts = <1 9>;
+//   #address-cells = <1>;
+//   #size-cells = <0>;
+//   clocks = <&clk_usb>;
+//   clock-names = "otg";
+//   phys = <&usbphy>;
+//   phy-names = "usb2-phy";
+// };
+
+// From: https://github.com/raspberrypi/linux/blob/rpi-5.10.y/arch/arm/boot/dts/bcm283x-rpi-usb-otg.dtsi
+// SPDX-License-Identifier: GPL-2.0
+// &usb {
+//   dr_mode = "otg";
+//   g-rx-fifo-size = <256>;
+//   g-np-tx-fifo-size = <32>;
+  
+//    * According to dwc2 the sum of all device EP
+//    * fifo sizes shouldn't exceed 3776 bytes.
+   
+//   g-tx-fifo-size = <256 256 512 512 512 768 768>;
+// };
+
+// From: https://github.com/raspberrypi/linux/blob/rpi-5.10.y/arch/arm/boot/dts/bcm2711-rpi.dtsi
+// &usb {
+//   /* Enable the FIQ support */
+//   reg = <0x7e980000 0x10000>,
+//         <0x7e00b200 0x200>;
+//   interrupts = <GIC_SPI 73 IRQ_TYPE_LEVEL_HIGH>,
+//          <GIC_SPI 40 IRQ_TYPE_LEVEL_HIGH>;
+//   status = "disabled";
+// };
+
+// From: https://github.com/raspberrypi/linux/blob/rpi-5.10.y/arch/arm/boot/dts/bcm2711.dtsi
+// &usb {
+//   interrupts = <GIC_SPI 73 IRQ_TYPE_LEVEL_HIGH>;
+// };
+
+// From: https://github.com/torvalds/linux/blob/1d597682d3e669ec7021aa33d088ed3d136a5149/drivers/usb/dwc2/params.c
+// static void dwc2_set_bcm_params(struct dwc2_hsotg *hsotg)
+// {
+//   struct dwc2_core_params *p = &hsotg->params;
+
+//   p->host_rx_fifo_size = 774;
+//   p->max_transfer_size = 65535;
+//   p->max_packet_count = 511;
+//   p->ahbcfg = 0x10;
+// }
+
 #include "device/dcd.h"
+
+TU_VERIFY_STATIC(sizeof(USB_OTG_GlobalTypeDef) == 0x140, "size is incorrect");
 
 //--------------------------------------------------------------------+
 // MACRO TYPEDEF CONSTANT ENUM
 //--------------------------------------------------------------------+
 
-// On STM32 we associate Port0 to OTG_FS, and Port1 to OTG_HS
-#if TUD_OPT_RHPORT == 0
-#define EP_MAX            EP_MAX_FS
-#define EP_FIFO_SIZE      EP_FIFO_SIZE_FS
-#define RHPORT_REGS_BASE  USB_OTG_FS_PERIPH_BASE
-#define RHPORT_IRQn       OTG_FS_IRQn
-
-#else
-#define EP_MAX            EP_MAX_HS
-#define EP_FIFO_SIZE      EP_FIFO_SIZE_HS
-#define RHPORT_REGS_BASE  USB_OTG_HS_PERIPH_BASE
-#define RHPORT_IRQn       OTG_HS_IRQn
-
-#endif
+#define RHPORT_REGS_BASE USB_OTG_GLOBAL_BASE
 
 #define GLOBAL_BASE(_port)     ((USB_OTG_GlobalTypeDef*) RHPORT_REGS_BASE)
-#define DEVICE_BASE(_port)     (USB_OTG_DeviceTypeDef *) (RHPORT_REGS_BASE + USB_OTG_DEVICE_BASE)
+#define DEVICE_BASE(_port)     (USB_OTG_DeviceTypeDef *) (USB_OTG_DEVICE_BASE)
 #define OUT_EP_BASE(_port)     (USB_OTG_OUTEndpointTypeDef *) (RHPORT_REGS_BASE + USB_OTG_OUT_ENDPOINT_BASE)
 #define IN_EP_BASE(_port)      (USB_OTG_INEndpointTypeDef *) (RHPORT_REGS_BASE + USB_OTG_IN_ENDPOINT_BASE)
 #define FIFO_BASE(_port, _x)   ((volatile uint32_t *) (RHPORT_REGS_BASE + USB_OTG_FIFO_BASE + (_x) * USB_OTG_FIFO_SIZE))
@@ -279,7 +254,11 @@ static void bus_reset(uint8_t rhport)
   //   are enabled at least "2 x (Largest-EPsize/4) + 1" are recommended.  Maybe provide a macro for application to
   //   overwrite this.
 
-  usb_otg->GRXFSIZ = calc_rx_ff_size(TUD_OPT_HIGH_SPEED ? 512 : 64);
+  #if TUD_OPT_HIGH_SPEED
+  usb_otg->GRXFSIZ = calc_rx_ff_size(512);
+  #else
+  usb_otg->GRXFSIZ = calc_rx_ff_size(64);
+  #endif
 
   _allocated_fifo_words_tx = 16;
 
@@ -365,12 +344,15 @@ static void set_speed(uint8_t rhport, tusb_speed_t speed)
   dev->DCFG |= (bitvalue << USB_OTG_DCFG_DSPD_Pos);
 }
 
-#if defined(USB_HS_PHYC)
+#if 0
+// From CM4IO xtal to usb hub, may not be correct
+#define HSE_VALUE 24000000
+
 static bool USB_HS_PHYCInit(void)
 {
   USB_HS_PHYC_GlobalTypeDef *usb_hs_phyc = (USB_HS_PHYC_GlobalTypeDef*) USB_HS_PHYC_CONTROLLER_BASE;
 
-  // Enable LDO: Note STM32F72/3xx Reference Manual rev 3 June 2018 incorrectly defined this bit as Disabled !!
+  // Enable LDO
   usb_hs_phyc->USB_HS_PHYC_LDO |= USB_HS_PHYC_LDO_ENABLE;
 
   // Wait until LDO ready
@@ -459,54 +441,106 @@ static void edpt_schedule_packets(uint8_t rhport, uint8_t const epnum, uint8_t c
 /*------------------------------------------------------------------*/
 /* Controller API
  *------------------------------------------------------------------*/
+
+TU_ATTR_UNUSED
+static void reset_core(USB_OTG_GlobalTypeDef * usb_otg) {
+  while ((usb_otg->GRSTCTL & USB_OTG_GRSTCTL_AHBIDL) == 0) {}
+
+  TU_LOG(2, "    resetting\r\n");
+  usb_otg->GRSTCTL |= USB_OTG_GRSTCTL_CSRST;
+  TU_LOG(2, "    waiting\r\n");
+  while ((usb_otg->GRSTCTL & (USB_OTG_GRSTCTL_AHBIDL | USB_OTG_GRSTCTL_CSRST)) != USB_OTG_GRSTCTL_AHBIDL) {}
+  TU_LOG(2, "    reset done\r\n");
+}
+
 void dcd_init (uint8_t rhport)
 {
+  printf("test done\r\n");
   // Programming model begins in the last section of the chapter on the USB
   // peripheral in each Reference Manual.
+  TU_LOG(2, "    dcd_init\r\n");
+
+  TU_LOG2("Test 123\r\n");
 
   USB_OTG_GlobalTypeDef * usb_otg = GLOBAL_BASE(rhport);
 
-  // No HNP/SRP (no OTG support), program timeout later.
-  if ( rhport == 1 )
-  {
-    // On selected MCUs HS port1 can be used with external PHY via ULPI interface
-#if CFG_TUSB_RHPORT1_MODE & OPT_MODE_HIGH_SPEED
-    // deactivate internal PHY
-    usb_otg->GCCFG &= ~USB_OTG_GCCFG_PWRDWN;
+#if 1
+  // No VBUS sense
+  usb_otg->GCCFG &= ~(1UL << 21); // USB_OTG_GCCFG_VBDEN
 
-    // Init The UTMI Interface
-    usb_otg->GUSBCFG &= ~(USB_OTG_GUSBCFG_TSDPS | USB_OTG_GUSBCFG_ULPIFSLS | USB_OTG_GUSBCFG_PHYSEL);
+  // B-peripheral session valid override enable
+  usb_otg->GOTGCTL |= (1UL << 6); // USB_OTG_GOTGCTL_BVALOEN
+  usb_otg->GOTGCTL |= (1UL << 7); // USB_OTG_GOTGCTL_BVALOVAL
 
-    // Select default internal VBUS Indicator and Drive for ULPI
-    usb_otg->GUSBCFG &= ~(USB_OTG_GUSBCFG_ULPIEVBUSD | USB_OTG_GUSBCFG_ULPIEVBUSI);
-#else
-    usb_otg->GUSBCFG |= USB_OTG_GUSBCFG_PHYSEL;
-#endif
+  // Force device mode
+  usb_otg->GUSBCFG &= ~USB_OTG_GUSBCFG_FHMOD;
+  usb_otg->GUSBCFG |= USB_OTG_GUSBCFG_FDMOD;
 
-#if defined(USB_HS_PHYC)
-    // Highspeed with embedded UTMI PHYC
+  // deactivate internal PHY
+  usb_otg->GCCFG &= ~USB_OTG_GCCFG_PWRDWN;
 
-    // Select UTMI Interface
-    usb_otg->GUSBCFG &= ~USB_OTG_GUSBCFG_ULPI_UTMI_SEL;
-    usb_otg->GCCFG |= USB_OTG_GCCFG_PHYHSEN;
+  // Init The UTMI Interface
+  usb_otg->GUSBCFG &= ~(USB_OTG_GUSBCFG_TSDPS | USB_OTG_GUSBCFG_ULPIFSLS | USB_OTG_GUSBCFG_PHYSEL);
 
-    // Enables control of a High Speed USB PHY
-    USB_HS_PHYCInit();
-#endif
-  } else
-  {
-    // Enable internal PHY
-    usb_otg->GUSBCFG |= USB_OTG_GUSBCFG_PHYSEL;
-  }
+  // Select default internal VBUS Indicator and Drive for ULPI
+  usb_otg->GUSBCFG &= ~(USB_OTG_GUSBCFG_ULPIEVBUSD | USB_OTG_GUSBCFG_ULPIEVBUSI);
+
+  // Select UTMI Interface
+  usb_otg->GUSBCFG &= ~(1UL << 4); // USB_OTG_GUSBCFG_ULPI_UTMI_SEL
+  usb_otg->GCCFG |= (1UL << 32);   // USB_OTG_GCCFG_PHYHSEN
+
+  // Enables control of a High Speed USB PHY
+  //USB_HS_PHYCInit();
 
   // Reset core after selecting PHY
   // Wait AHB IDLE, reset then wait until it is cleared
-  while ((usb_otg->GRSTCTL & USB_OTG_GRSTCTL_AHBIDL) == 0U) {}
-  usb_otg->GRSTCTL |= USB_OTG_GRSTCTL_CSRST;
-  while ((usb_otg->GRSTCTL & USB_OTG_GRSTCTL_CSRST) == USB_OTG_GRSTCTL_CSRST) {}
+//  while ((usb_otg->GRSTCTL & USB_OTG_GRSTCTL_AHBIDL) == 0U) {}
+//  usb_otg->GRSTCTL |= USB_OTG_GRSTCTL_CSRST;
+//  while ((usb_otg->GRSTCTL & USB_OTG_GRSTCTL_CSRST) == USB_OTG_GRSTCTL_CSRST) {}
+
+  reset_core(usb_otg);
 
   // Restart PHY clock
   *((volatile uint32_t *)(RHPORT_REGS_BASE + USB_OTG_PCGCCTL_BASE)) = 0;
+
+#else
+
+  // ReadBackReg(&Core->Usb);
+  // Core->Usb.UlpiDriveExternalVbus = 0;
+  // Core->Usb.TsDlinePulseEnable = 0;
+  // WriteThroughReg(&Core->Usb);
+
+  // This sequence is modeled after: https://github.com/Chadderz121/csud/blob/e13b9355d043a9cdd384b335060f1bc0416df61e/source/hcd/dwc/designware20.c#L689
+  usb_otg->GUSBCFG &= ~(USB_OTG_GUSBCFG_TSDPS | USB_OTG_GUSBCFG_ULPIEVBUSD);
+  reset_core(usb_otg);
+
+  //   Core->Usb.ModeSelect = UTMI;
+  //   LOG_DEBUG("HCD: Interface: UTMI+.\n");
+  //   Core->Usb.PhyInterface = false;
+
+  //   HcdReset();
+  TU_LOG2("init phy\r\n");
+  usb_otg->GUSBCFG |= (1 << 4); // bit four sets UTMI+ mode
+  usb_otg->GUSBCFG &= ~(1 << 3); // bit three disables phy interface
+  reset_core(usb_otg);
+
+  //   LOG_DEBUG("HCD: ULPI FSLS configuration: disabled.\n");
+  //   Core->Usb.UlpiFsls = false;
+  //   Core->Usb.ulpi_clk_sus_m = false;
+  usb_otg->GUSBCFG &= ~(USB_OTG_GUSBCFG_ULPIFSLS | USB_OTG_GUSBCFG_ULPICSM);
+
+  // LOG_DEBUG("HCD: DMA configuration: enabled.\n");
+  // Core->Ahb.DmaEnable = true;
+  // Core->Ahb.DmaRemainderMode = Incremental;
+  usb_otg->GAHBCFG &= ~(1 << 23); // Remainder mode
+  usb_otg->GAHBCFG |= USB_OTG_GAHBCFG_DMAEN;
+
+  //   LOG_DEBUG("HCD: HNP/SRP configuration: HNP, SRP.\n");
+  //   Core->Usb.HnpCapable = true;
+  //   Core->Usb.SrpCapable = true;
+  usb_otg->GUSBCFG |= USB_OTG_GUSBCFG_SRPCAP | USB_OTG_GUSBCFG_HNPCAP;
+
+#endif
 
   // Clear all interrupts
   usb_otg->GINTSTS |= usb_otg->GINTSTS;
@@ -522,10 +556,10 @@ void dcd_init (uint8_t rhport)
   // (non zero-length packet), send STALL back and discard.
   dev->DCFG |=  USB_OTG_DCFG_NZLSOHSK;
 
-  set_speed(rhport, TUD_OPT_HIGH_SPEED ? TUSB_SPEED_HIGH : TUSB_SPEED_FULL);
+  set_speed(rhport, TUSB_SPEED_HIGH);
 
-  // Enable internal USB transceiver, unless using HS core (port 1) with external PHY.
-  if (!(rhport == 1 && (CFG_TUSB_RHPORT1_MODE & OPT_MODE_HIGH_SPEED))) usb_otg->GCCFG |= USB_OTG_GCCFG_PWRDWN;
+  // TODO internal phy (full speed)
+  usb_otg->GCCFG |= USB_OTG_GCCFG_PWRDWN;
 
   usb_otg->GINTMSK |= USB_OTG_GINTMSK_USBRST   | USB_OTG_GINTMSK_ENUMDNEM |
       USB_OTG_GINTMSK_USBSUSPM | USB_OTG_GINTMSK_WUIM     |
@@ -540,13 +574,13 @@ void dcd_init (uint8_t rhport)
 void dcd_int_enable (uint8_t rhport)
 {
   (void) rhport;
-  NVIC_EnableIRQ(RHPORT_IRQn);
+  BP_EnableIRQ(USB_IRQn);
 }
 
 void dcd_int_disable (uint8_t rhport)
 {
   (void) rhport;
-  NVIC_DisableIRQ(RHPORT_IRQn);
+  BP_DisableIRQ(USB_IRQn);
 }
 
 void dcd_set_address (uint8_t rhport, uint8_t dev_addr)
@@ -564,7 +598,7 @@ static void remote_wakeup_delay(void)
   uint32_t count = SystemCoreClock / 1000;
   while ( count-- )
   {
-    __NOP();
+    // __NOP();
   }
 }
 
