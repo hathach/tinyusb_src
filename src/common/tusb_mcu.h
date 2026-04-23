@@ -455,7 +455,7 @@
   #define CFG_TUSB_OS_INC_PATH_DEFAULT freertos/
   // clang-format on
 
-  #if CFG_TUSB_MCU == OPT_MCU_ESP32S3
+  #if CFG_TUSB_MCU == OPT_MCU_ESP32S3 || CFG_TUSB_MCU == OPT_MCU_ESP32H4
     #define TUP_MCU_MULTIPLE_CORE 1
   #endif
 
@@ -475,6 +475,22 @@
   #define CFG_TUD_MEM_DCACHE_ENABLE_DEFAULT     CFG_TUD_DWC2_DMA_ENABLE
   #define CFG_TUH_MEM_DCACHE_ENABLE_DEFAULT     CFG_TUH_DWC2_DMA_ENABLE
   #define CFG_TUSB_MEM_DCACHE_LINE_SIZE_DEFAULT 64
+
+#elif TU_CHECK_MCU(OPT_MCU_ESP32S31)
+  #define TUP_USBIP_DWC2
+  #define TUP_USBIP_DWC2_ESP32
+  #define TUP_RHPORT_HIGHSPEED                  1
+  #define TUP_DCD_ENDPOINT_MAX                  16
+
+  // clang-format off
+  #define CFG_TUSB_OS_INC_PATH_DEFAULT          freertos/
+  // clang-format on
+
+  #define TUP_MCU_MULTIPLE_CORE                 1
+
+  // Disable slave if DMA is enabled
+  #define CFG_TUD_DWC2_SLAVE_ENABLE_DEFAULT     !CFG_TUD_DWC2_DMA_ENABLE
+  #define CFG_TUH_DWC2_SLAVE_ENABLE_DEFAULT     !CFG_TUH_DWC2_DMA_ENABLE
 
 #elif TU_CHECK_MCU(OPT_MCU_ESP32, OPT_MCU_ESP32C2, OPT_MCU_ESP32C3, OPT_MCU_ESP32C5, OPT_MCU_ESP32C6, \
                    OPT_MCU_ESP32C61, OPT_MCU_ESP32H2)

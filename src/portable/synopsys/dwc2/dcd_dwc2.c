@@ -541,8 +541,9 @@ void dcd_remote_wakeup(uint8_t rhport) {
 void dcd_connect(uint8_t rhport) {
   dwc2_regs_t* dwc2 = DWC2_REG(rhport);
 
-#ifdef TUP_USBIP_DWC2_ESP32
-  // On ESP32-P4 HS PHY, do not write to USB_WRAP register which belongs to FS PHY
+#if defined(TUP_USBIP_DWC2_ESP32) && !TU_CHECK_MCU(OPT_MCU_ESP32S31)
+  // S31 is excluded at compile time (no USB_WRAP peripheral).
+  // On P4, the HS PHY (port 1) must not touch USB_WRAP which belongs to the FS PHY.
   if (rhport == 0) {
     usb_wrap_otg_conf_reg_t conf = USB_WRAP.otg_conf;
     conf.pad_pull_override = 0;
@@ -560,8 +561,9 @@ void dcd_connect(uint8_t rhport) {
 void dcd_disconnect(uint8_t rhport) {
   dwc2_regs_t* dwc2 = DWC2_REG(rhport);
 
-#ifdef TUP_USBIP_DWC2_ESP32
-  // On ESP32-P4 HS PHY, do not write to USB_WRAP register which belongs to FS PHY
+#if defined(TUP_USBIP_DWC2_ESP32) && !TU_CHECK_MCU(OPT_MCU_ESP32S31)
+  // S31 is excluded at compile time (no USB_WRAP peripheral).
+  // On P4, the HS PHY (port 1) must not touch USB_WRAP which belongs to the FS PHY.
   if (rhport == 0) {
     usb_wrap_otg_conf_reg_t conf = USB_WRAP.otg_conf;
     conf.pad_pull_override = 1;
