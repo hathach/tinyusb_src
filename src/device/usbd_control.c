@@ -44,10 +44,6 @@ TU_ATTR_WEAK void dcd_edpt0_status_complete(uint8_t rhport, const tusb_control_r
 // MACRO CONSTANT TYPEDEF
 //--------------------------------------------------------------------+
 
-enum {
-  EDPT_CTRL_OUT = 0x00,
-  EDPT_CTRL_IN = 0x80
-};
 
 typedef struct {
   tusb_control_request_t request;
@@ -74,7 +70,7 @@ uint8_t* usbd_get_ctrl_buf(void) {
 // Queue ZLP status transaction
 static inline bool status_stage_xact(uint8_t rhport, const tusb_control_request_t* request) {
   // Opposite to endpoint in Data Phase
-  const uint8_t ep_addr = request->bmRequestType_bit.direction ? EDPT_CTRL_OUT : EDPT_CTRL_IN;
+  const uint8_t ep_addr = request->bmRequestType_bit.direction ? TU_EP0_OUT : TU_EP0_IN;
   return usbd_edpt_xfer(rhport, ep_addr, NULL, 0, false);
 }
 
@@ -93,10 +89,10 @@ bool tud_control_status(uint8_t rhport, const tusb_control_request_t* request) {
 // This function can also transfer an zero-length packet
 static bool data_stage_xact(uint8_t rhport) {
   const uint16_t xact_len = tu_min16(_ctrl_xfer.data_len - _ctrl_xfer.total_xferred, CFG_TUD_ENDPOINT0_BUFSIZE);
-  uint8_t ep_addr = EDPT_CTRL_OUT;
+  uint8_t ep_addr = TU_EP0_OUT;
 
   if (_ctrl_xfer.request.bmRequestType_bit.direction == TUSB_DIR_IN) {
-    ep_addr = EDPT_CTRL_IN;
+    ep_addr = TU_EP0_IN;
     if (0u != xact_len && _ctrl_xfer.buffer != _ctrl_epbuf.buf) {
       TU_VERIFY(0 == tu_memcpy_s(_ctrl_epbuf.buf, CFG_TUD_ENDPOINT0_BUFSIZE, _ctrl_xfer.buffer, xact_len));
     }
@@ -203,8 +199,8 @@ bool usbd_control_xfer_cb(uint8_t rhport, uint8_t ep_addr, xfer_result_t result,
       TU_ASSERT(status_stage_xact(rhport, &_ctrl_xfer.request));
     } else {
       // Stall both IN and OUT control endpoint
-      dcd_edpt_stall(rhport, EDPT_CTRL_OUT);
-      dcd_edpt_stall(rhport, EDPT_CTRL_IN);
+      dcd_edpt_stall(rhport, TU_EP0_OUT);
+      dcd_edpt_stall(rhport, TU_EP0_IN);
     }
   } else {
     // More data to transfer
