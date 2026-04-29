@@ -67,11 +67,16 @@ uint8_t* usbd_get_ctrl_buf(void) {
 // Application API
 //--------------------------------------------------------------------+
 
+// Endpoint used for the Status stage of a control transfer.
+// Per USB 2.0 §9.3.1, when wLength == 0 the Direction bit is ignored and the Status stage
+// is always IN. Otherwise the Status stage is opposite to the Data stage direction.
+TU_ATTR_ALWAYS_INLINE static inline uint8_t status_stage_ep(const tusb_control_request_t* request) {
+  return (request->wLength != 0 && request->bmRequestType_bit.direction) ? TU_EP0_OUT : TU_EP0_IN;
+}
+
 // Queue ZLP status transaction
-static inline bool status_stage_xact(uint8_t rhport, const tusb_control_request_t* request) {
-  // Opposite to endpoint in Data Phase
-  const uint8_t ep_addr = request->bmRequestType_bit.direction ? TU_EP0_OUT : TU_EP0_IN;
-  return usbd_edpt_xfer(rhport, ep_addr, NULL, 0, false);
+TU_ATTR_ALWAYS_INLINE static inline  bool status_stage_xact(uint8_t rhport, uint8_t ep_status) {
+  return usbd_edpt_xfer(rhport, ep_status, NULL, 0, false);
 }
 
 // Status phase
@@ -81,7 +86,7 @@ bool tud_control_status(uint8_t rhport, const tusb_control_request_t* request) {
   _ctrl_xfer.total_xferred = 0;
   _ctrl_xfer.data_len = 0;
 
-  return status_stage_xact(rhport, request);
+  return status_stage_xact(rhport, status_stage_ep(request));
 }
 
 // Queue a transaction in Data Stage
@@ -115,7 +120,7 @@ bool tud_control_xfer(uint8_t rhport, const tusb_control_request_t* request, voi
     }
     TU_ASSERT(data_stage_xact(rhport));
   } else {
-    TU_ASSERT(status_stage_xact(rhport, request));
+    TU_ASSERT(status_stage_xact(rhport, TU_EP0_IN));
   }
 
   return true;
@@ -152,8 +157,9 @@ void usbd_control_set_request(const tusb_control_request_t* request) {
 bool usbd_control_xfer_cb(uint8_t rhport, uint8_t ep_addr, xfer_result_t result, uint32_t xferred_bytes) {
   (void) result;
 
-  // Endpoint Address is opposite to direction bit, this is Status Stage complete event
-  if (tu_edpt_dir(ep_addr) != _ctrl_xfer.request.bmRequestType_bit.direction) {
+  // Status Stage complete: endpoint matches the Status stage endpoint
+  uint8_t const ep_status = status_stage_ep(&_ctrl_xfer.request);
+  if (ep_addr == ep_status) {
     TU_ASSERT(0 == xferred_bytes);
 
     // invoke optional dcd hook if available
@@ -167,6 +173,7 @@ bool usbd_control_xfer_cb(uint8_t rhport, uint8_t ep_addr, xfer_result_t result,
     return true;
   }
 
+  // Data stage complete
   if (_ctrl_xfer.request.bmRequestType_bit.direction == TUSB_DIR_OUT) {
     TU_VERIFY(_ctrl_xfer.buffer);
     if (_ctrl_xfer.buffer != _ctrl_epbuf.buf) {
@@ -196,7 +203,7 @@ bool usbd_control_xfer_cb(uint8_t rhport, uint8_t ep_addr, xfer_result_t result,
     }
 
     if (is_ok) {
-      TU_ASSERT(status_stage_xact(rhport, &_ctrl_xfer.request));
+      TU_ASSERT(status_stage_xact(rhport, ep_status));
     } else {
       // Stall both IN and OUT control endpoint
       dcd_edpt_stall(rhport, TU_EP0_OUT);
