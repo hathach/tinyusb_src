@@ -82,6 +82,13 @@ CFG_TUD_MEM_SECTION static netd_epbuf_t _netd_epbuf;
 static bool can_xmit;
 static bool ecm_link_is_up = true;  // Store link state for ECM mode
 
+//--------------------------------------------------------------------+
+// Weak stubs: invoked if no strong implementation is available
+//--------------------------------------------------------------------+
+TU_ATTR_WEAK void tud_network_set_packet_filter_cb(uint16_t packet_filter) {
+  (void) packet_filter;
+}
+
 void tud_network_recv_renew(void) {
   usbd_edpt_xfer(0, _netd_itf.ep_out, _netd_epbuf.rx, NETD_PACKET_SIZE, false);
 }
@@ -290,6 +297,7 @@ bool netd_control_xfer_cb (uint8_t rhport, uint8_t stage, tusb_control_request_t
         if (_netd_itf.ecm_mode) {
           /* the only required CDC-ECM Management Element Request is SetEthernetPacketFilter */
           if (0x43 /* SET_ETHERNET_PACKET_FILTER */ == request->bRequest) {
+            tud_network_set_packet_filter_cb(request->wValue);
             tud_control_xfer(rhport, request, NULL, 0);
             // Only send connection notification if link is up
             if (ecm_link_is_up) {
