@@ -602,7 +602,7 @@ static bool recv_validate_datagram(const recv_ntb_t *ntb, uint32_t len) {
     TU_LOG_DRV("(EE) ill block length2: %d > %d\n", nth16->wBlockLength, CFG_TUD_NCM_OUT_NTB_MAX_SIZE);
     return false;
   }
-  if (nth16->wNdpIndex < sizeof(nth16) || nth16->wNdpIndex > len - (sizeof(ndp16_t) + 2 * sizeof(ndp16_datagram_t))) {
+  if (nth16->wNdpIndex < sizeof(nth16_t) || nth16->wNdpIndex > len - (sizeof(ndp16_t) + 2 * sizeof(ndp16_datagram_t))) {
     TU_LOG_DRV("(EE) ill position of first ndp: %d (%lu)\n", nth16->wNdpIndex, len);
     return false;
   }
@@ -612,6 +612,12 @@ static bool recv_validate_datagram(const recv_ntb_t *ntb, uint32_t len) {
 
   if (ndp16->wLength < sizeof(ndp16_t) + 2 * sizeof(ndp16_datagram_t)) {
     TU_LOG_DRV("(EE) ill ndp16 length: %d\n", ndp16->wLength);
+    return false;
+  }
+  // the NDP block (wLength bytes from wNdpIndex) must fit within the received NTB, otherwise the
+  // datagram pointer array walked below (max_ndx is derived from wLength) runs past ntb->data
+  if ((uint32_t) nth16->wNdpIndex + ndp16->wLength > len) {
+    TU_LOG_DRV("(EE) ill ndp16 length: %d (%lu)\n", ndp16->wLength, len);
     return false;
   }
   if (ndp16->dwSignature != NDP16_SIGNATURE_NCM0 && ndp16->dwSignature != NDP16_SIGNATURE_NCM1) {
