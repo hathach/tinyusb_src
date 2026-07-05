@@ -324,8 +324,11 @@ static void handle_incoming_packet(uint32_t len) {
     rndis_data_packet_t* r = (rndis_data_packet_t*)((void*)pnt);
     if (len >= sizeof(rndis_data_packet_t)) {
       if ((r->MessageType == REMOTE_NDIS_PACKET_MSG) && (r->MessageLength <= len)) {
-        if ((r->DataOffset + offsetof(rndis_data_packet_t, DataOffset) + r->DataLength) <= len) {
-          pnt = &_netd_epbuf.rx[r->DataOffset + offsetof(rndis_data_packet_t, DataOffset)];
+        // DataOffset and DataLength are host-controlled; validate the payload window fits
+        // within the received data without overflowing the uint32 addition (len >= header)
+        const uint32_t hdr = offsetof(rndis_data_packet_t, DataOffset);
+        if ((r->DataOffset <= len - hdr) && (r->DataLength <= len - hdr - r->DataOffset)) {
+          pnt = &_netd_epbuf.rx[hdr + r->DataOffset];
           size = r->DataLength;
         }
       }
