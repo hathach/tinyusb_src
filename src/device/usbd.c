@@ -361,13 +361,12 @@ static const usbd_class_driver_t _usbd_driver[] = {
     #endif
 };
 
-enum { BUILTIN_DRIVER_COUNT = TU_ARRAY_SIZE(_usbd_driver) };
-
 // Additional class drivers implemented by application
-static const usbd_class_driver_t *_app_driver       = NULL;
-static uint8_t                    _app_driver_count = 0;
+static const usbd_class_driver_t *_app_driver = NULL;
+static const uint8_t _builtin_driver_count    = TU_ARRAY_SIZE(_usbd_driver);
+static uint8_t              _app_driver_count = 0;
 
-#define TOTAL_DRIVER_COUNT    ((uint8_t) (_app_driver_count + BUILTIN_DRIVER_COUNT))
+#define TOTAL_DRIVER_COUNT    ((uint8_t) (_app_driver_count + _builtin_driver_count))
 
 // virtually joins built-in and application drivers together.
 // Application is positioned first to allow overwriting built-in ones.
@@ -378,7 +377,7 @@ TU_ATTR_ALWAYS_INLINE static inline usbd_class_driver_t const * get_driver(uint8
     driver = &_app_driver[drvid];
   } else{
     drvid -= _app_driver_count;
-    if (drvid < BUILTIN_DRIVER_COUNT) {
+    if (_builtin_driver_count > 0 && drvid < _builtin_driver_count) {
       driver = &_usbd_driver[drvid];
     }
   }
@@ -563,7 +562,7 @@ bool tud_rhport_init(uint8_t rhport, const tusb_rhport_init_t* rh_init) {
 
   // Get application driver if available
   _app_driver = usbd_app_driver_get_cb(&_app_driver_count);
-  TU_ASSERT(_app_driver_count + BUILTIN_DRIVER_COUNT <= UINT8_MAX);
+  TU_ASSERT(_app_driver_count + _builtin_driver_count <= UINT8_MAX);
 
   // Init class drivers
   for (uint8_t i = 0; i < TOTAL_DRIVER_COUNT; i++) {
