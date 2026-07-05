@@ -252,9 +252,12 @@ bool tud_usbtmc_transmit_notification_data(const void *data, size_t len) {
   TU_ASSERT(len > 0);
   TU_ASSERT(usbtmc_state.ep_int_in != 0);
 #endif
-  TU_VERIFY(usbd_edpt_busy(usbtmc_state.rhport, usbtmc_state.ep_int_in));
+  TU_VERIFY(usbd_edpt_claim(usbtmc_state.rhport, usbtmc_state.ep_int_in));
 
-  TU_VERIFY(tu_memcpy_s(usbtmc_epbuf.epnotif, CFG_TUD_USBTMC_INT_EP_SIZE, data, len) == 0);
+  if (tu_memcpy_s(usbtmc_epbuf.epnotif, CFG_TUD_USBTMC_INT_EP_SIZE, data, len) != 0) {
+    usbd_edpt_release(usbtmc_state.rhport, usbtmc_state.ep_int_in);
+    return false;
+  }
   TU_VERIFY(usbd_edpt_xfer(usbtmc_state.rhport, usbtmc_state.ep_int_in, usbtmc_epbuf.epnotif, (uint16_t) len, false));
   return true;
 }
