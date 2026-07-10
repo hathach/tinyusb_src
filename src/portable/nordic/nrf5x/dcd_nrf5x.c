@@ -843,6 +843,10 @@ static bool hfclk_running(void) {
 
   #if CFG_TUD_NRF_NRFX_VERSION == 1
   return nrf_clock_hf_is_running(NRF_CLOCK_HFCLK_HIGH_ACCURACY);
+  #elif CFG_TUD_NRF_NRFX_VERSION == 2
+  // nrfx 2.0.0 (MDK 8.29.0) has no nrf_clock_is_running(); it arrived in 2.1.0.
+  // nrf_clock_hf_is_running() is present in all of 2.0.0-2.11.0 (deprecated from 2.1.0).
+  return nrf_clock_hf_is_running(NRF_CLOCK, NRF_CLOCK_HFCLK_HIGH_ACCURACY);
   #else
   return nrf_clock_is_running(NRF_CLOCK, NRF_CLOCK_DOMAIN_HFCLK, NULL);
   #endif
