@@ -1161,9 +1161,6 @@ static bool audiod_set_interface(uint8_t rhport, tusb_control_request_t const *p
             is_feedback_ep = (desc_ep->bmAttributes.usage == 1);
           }
 
-          //TODO: We need to set EP non busy since this is not taken care of right now in ep_close() - THIS IS A WORKAROUND!
-          usbd_edpt_clear_stall(rhport, ep_addr);
-
 #if CFG_TUD_AUDIO_ENABLE_EP_IN
           // For data or data with implicit feedback IN EP
           if (tu_edpt_dir(ep_addr) == TUSB_DIR_IN && is_data_ep)

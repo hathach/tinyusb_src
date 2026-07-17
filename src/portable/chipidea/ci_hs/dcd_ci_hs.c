@@ -393,7 +393,8 @@ void dcd_edpt_stall(uint8_t rhport, uint8_t ep_addr) {
   ci_hs_regs_t *dcd_reg = CI_HS_REG(rhport);
   dcd_reg->ENDPTCTRL[epnum] |= ENDPTCTRL_STALL << (dir ? 16 : 0);
 
-  // flush to abort any primed buffer
+  // flush to abort any primed buffer; the aborted transfer's dQH overlay can be left
+  // ACTIVE with mid-transfer state - qhd_start_xfer clears it before the next prime
   dcd_reg->ENDPTFLUSH = TU_BIT(epnum + (dir ? 16 : 0));
 }
 
@@ -497,6 +498,7 @@ static void qhd_start_xfer(uint8_t rhport, uint8_t epnum, uint8_t dir) {
   dcd_qtd_t    *p_qtd   = &_dcd_data.qtd[epnum][dir];
 
   p_qhd->qtd_overlay.halted = false;           // clear any previous error
+  p_qhd->qtd_overlay.active = false;           // a flushed prime leaves stale ACTIVE state; clear it so the fresh qtd loads
   p_qhd->qtd_overlay.next   = (uint32_t)p_qtd; // link qtd to qhd
 
   // flush cache
