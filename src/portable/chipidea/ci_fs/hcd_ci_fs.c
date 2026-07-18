@@ -10,63 +10,28 @@
 
 #if CFG_TUH_ENABLED && defined(TUP_USBIP_CHIPIDEA_FS)
 
-#ifdef TUP_USBIP_CHIPIDEA_FS_KINETIS
+#include "host/hcd.h"
+#include "host/usbh.h"
+#include "ci_fs_type.h"
+
+// Host is currently only available on NXP Kinetis. The ChipIdea-FS host controller
+// interface is register-compatible via ci_fs_regs_t. Unlike the device driver, the host
+// driver does not include the ci_fs_<family>.h header because those define the device
+// dcd_int_enable()/dcd_int_disable() functions, which would collide in a dual-role build.
+#if defined(TUP_USBIP_CHIPIDEA_FS_KINETIS)
   #include "fsl_device_registers.h"
-  #define KHCI        USB0
+  #define CI_FS_REG(_port)  ((ci_fs_regs_t*) USB0_BASE)
+  #define CI_FS_IRQN        USB0_IRQn
 #else
   #error "MCU is not supported"
 #endif
 
-#include "host/hcd.h"
-#include "host/usbh.h"
+#define CI_REG              CI_FS_REG(0)
 
 //--------------------------------------------------------------------+
 // MACRO TYPEDEF CONSTANT ENUM DECLARATION
 //--------------------------------------------------------------------+
-
-enum {
-  TOK_PID_OUT   = 0x1u,
-  TOK_PID_IN    = 0x9u,
-  TOK_PID_SETUP = 0xDu,
-  TOK_PID_DATA0 = 0x3u,
-  TOK_PID_DATA1 = 0xbu,
-  TOK_PID_ACK   = 0x2u,
-  TOK_PID_STALL = 0xeu,
-  TOK_PID_NAK   = 0xau,
-  TOK_PID_BUSTO = 0x0u,
-  TOK_PID_ERR   = 0xfu,
-};
-
-typedef struct TU_ATTR_PACKED
-{
-  union {
-    uint32_t head;
-    struct {
-      union {
-        struct {
-               uint16_t           :  2;
-          __IO uint16_t tok_pid   :  4;
-               uint16_t data      :  1;
-          __IO uint16_t own       :  1;
-               uint16_t           :  8;
-        };
-        struct {
-               uint16_t           :  2;
-               uint16_t bdt_stall :  1;
-               uint16_t dts       :  1;
-               uint16_t ninc      :  1;
-               uint16_t keep      :  1;
-               uint16_t           : 10;
-        };
-      };
-      __IO uint16_t bc : 10;
-           uint16_t    :  6;
-    };
-  };
-  uint8_t *addr;
-}buffer_descriptor_t;
-
-TU_VERIFY_STATIC( sizeof(buffer_descriptor_t) == 8, "size is not correct" );
+// TOK_PID_* and buffer_descriptor_t are shared with the device driver in ci_fs_type.h
 
 typedef struct TU_ATTR_PACKED
 {
@@ -107,7 +72,10 @@ typedef struct
   union {
     /* [OUT,IN][EVEN,ODD] */
     buffer_descriptor_t bdt[2][2];
-    uint16_t            bda[2*2];
+    /* bda aliases bdt for STAT-register indexing: STAT gives the byte-offset/2 of the
+     * completed BD, so it indexes bda[] in uint16_t units. Each buffer_descriptor_t is
+     * 4 uint16_t, hence 2*2*4 elements to span the whole table (must equal sizeof bdt). */
+    uint16_t            bda[2*2*4];
   };
   endpoint_state_t endpoint[2];
   pipe_state_t pipe[CFG_TUH_ENDPOINT_MAX * 2];
@@ -142,7 +110,9 @@ static int prepare_packets(int pipenum)
   endpoint_state_t *ep    = &_hcd.endpoint[dir_tx];
   unsigned const odd      = ep->odd;
   buffer_descriptor_t *bd = _hcd.bdt[dir_tx];
-  TU_ASSERT(0 == bd[odd].own, -1);
+  // The host shares a single BDT set across all pipes. If it is still owned by an
+  // in-flight transfer on another pipe, report busy so the caller can defer & retry.
+  if (bd[odd].own) return -1;
 
   // TU_LOG1("  %p dir %d odd %d data %d\r\n", &bd[odd], dir_tx, odd, pipe->data);
 
@@ -200,11 +170,11 @@ static bool continue_transfer(int pipenum, buffer_descriptor_t *bd)
       bd->bc    = next_rem > pipe->max_packet_size ? pipe->max_packet_size: next_rem;
       __DSB();
       bd->own   = 1; /* This bit must be set last */
-      while (KHCI->CTL & USB_CTL_TXSUSPENDTOKENBUSY_MASK) ;
-      KHCI->TOKEN = KHCI->TOKEN; /* Queue the same token as the last */
+      while (CI_REG->CTL & USB_CTL_TXSUSPENDTOKENBUSY_MASK) ;
+      CI_REG->TOKEN = CI_REG->TOKEN; /* Queue the same token as the last */
     } else if (TUSB_DIR_IN == tu_edpt_dir(pipe->ep_addr)) { /* IN */
-      while (KHCI->CTL & USB_CTL_TXSUSPENDTOKENBUSY_MASK) ;
-      KHCI->TOKEN = KHCI->TOKEN;
+      while (CI_REG->CTL & USB_CTL_TXSUSPENDTOKENBUSY_MASK) ;
+      CI_REG->TOKEN = CI_REG->TOKEN;
     }
     return true;
   }
@@ -215,13 +185,21 @@ static bool continue_transfer(int pipenum, buffer_descriptor_t *bd)
 static bool resume_transfer(int pipenum)
 {
   int num_tokens = prepare_packets(pipenum);
-  TU_ASSERT(0 <= num_tokens);
+  if (num_tokens < 0) {
+    // Shared BDT still owned by an in-flight transfer on another pipe. Defer this
+    // pipe and retry on the next SOF once the BDT is free (avoids dropping the
+    // transfer, which stalls e.g. a 2nd device enumerating behind a hub while the
+    // app issues concurrent control transfers).
+    _hcd.pending |= TU_BIT(pipenum);
+    CI_REG->INT_EN |= USB_ISTAT_SOFTOK_MASK;
+    return true;
+  }
 
-  const unsigned ie = NVIC_GetEnableIRQ(USB0_IRQn);
-  NVIC_DisableIRQ(USB0_IRQn);
+  const unsigned ie = NVIC_GetEnableIRQ(CI_FS_IRQN);
+  NVIC_DisableIRQ(CI_FS_IRQN);
   pipe_state_t *pipe = &_hcd.pipe[pipenum];
 
-  unsigned flags = KHCI->ENDPOINT[0].ENDPT & USB_ENDPT_HOSTWOHUB_MASK;
+  unsigned flags = CI_REG->EP[0].CTL & USB_ENDPT_HOSTWOHUB_MASK;
   flags |= USB_ENDPT_EPRXEN_MASK | USB_ENDPT_EPTXEN_MASK;
   switch (pipe->xfer) {
   case TUSB_XFER_CONTROL:
@@ -236,16 +214,16 @@ static bool resume_transfer(int pipenum)
   }
   // TU_LOG1("  resume pipenum %d flags %x\r\n", pipenum, flags);
 
-  KHCI->ENDPOINT[0].ENDPT = flags;
-  KHCI->ADDR  = (KHCI->ADDR & USB_ADDR_LSEN_MASK) | pipe->dev_addr;
+  CI_REG->EP[0].CTL = flags;
+  CI_REG->ADDR  = (CI_REG->ADDR & USB_ADDR_LSEN_MASK) | pipe->dev_addr;
 
   unsigned const token = tu_edpt_number(pipe->ep_addr) |
     ((tu_edpt_dir(pipe->ep_addr) ? TOK_PID_IN: TOK_PID_OUT) << USB_TOKEN_TOKENPID_SHIFT);
   do {
-    while (KHCI->CTL & USB_CTL_TXSUSPENDTOKENBUSY_MASK) ;
-    KHCI->TOKEN = token;
+    while (CI_REG->CTL & USB_CTL_TXSUSPENDTOKENBUSY_MASK) ;
+    CI_REG->TOKEN = token;
   } while (--num_tokens);
-  if (ie) NVIC_EnableIRQ(USB0_IRQn);
+  if (ie) NVIC_EnableIRQ(CI_FS_IRQN);
   return true;
 }
 
@@ -253,19 +231,38 @@ static void suspend_transfer(int pipenum, buffer_descriptor_t *bd)
 {
   pipe_state_t *pipe = &_hcd.pipe[pipenum];
   pipe->buffer  = bd->addr;
-  pipe->data    = bd->data ^ 1;
+  // A NAK transfers no data, so the data toggle must be preserved for the retry.
+  // (Do NOT flip pipe->data here: flipping it makes the retried packet use the wrong
+  // DATA0/DATA1, which the device silently discards - breaking any bulk/interrupt
+  // transfer that is NAKed, e.g. the MSC CBW/CSW when the device is momentarily busy.)
   if ((TUSB_XFER_INTERRUPT == pipe->xfer) ||
       (TUSB_XFER_BULK == pipe->xfer)) {
     _hcd.pending |= TU_BIT(pipenum);
-    KHCI->INTEN |= USB_ISTAT_SOFTOK_MASK;
+    CI_REG->INT_EN |= USB_ISTAT_SOFTOK_MASK;
+  }
+}
+
+// Release the speculatively-armed sibling BDT of a multi-packet transfer.
+// prepare_packets arms the sibling (odd^1) BDT (own=1) so a multi-packet transfer can
+// ping-pong without NAKs. When the transfer ends - completes early on a short IN packet,
+// stalls/errors, or (for IN) is NAKed before the sibling's token is issued - that sibling
+// is left owned by the SIE. Because the host shares ONE BDT set across all pipes, a
+// leftover armed sibling blocks every other pipe forever (e.g. a 2nd device stuck
+// enumerating behind a hub). Release it - but ONLY for a multi-packet transfer: a
+// single-packet transfer never armed a sibling, so that BDT slot may legitimately belong
+// to another pipe's in-flight transfer.
+static inline void release_sibling_bd(unsigned s, const pipe_state_t *pipe)
+{
+  if (pipe->length > pipe->max_packet_size) {
+    ((buffer_descriptor_t *)&_hcd.bda[s ^ USB_STAT_ODD_MASK])->own = 0;
   }
 }
 
 static void process_tokdne(uint8_t rhport)
 {
   (void)rhport;
-  const unsigned s = KHCI->STAT;
-  KHCI->ISTAT = USB_ISTAT_TOKDNE_MASK; /* fetch the next token if received */
+  const unsigned s = CI_REG->STAT;
+  CI_REG->INT_STAT = USB_ISTAT_TOKDNE_MASK; /* fetch the next token if received */
   uint8_t const dir_in = (s & USB_STAT_TX_MASK) ? TUSB_DIR_OUT: TUSB_DIR_IN;
   unsigned const odd   = (s & USB_STAT_ODD_MASK) ? 1 : 0;
 
@@ -295,6 +292,12 @@ static void process_tokdne(uint8_t rhport)
       result = XFER_RESULT_SUCCESS;
       break;
     case TOK_PID_NAK:
+      // Release the speculatively-armed sibling so the deferred retry (and any other pipe
+      // sharing the single BDT) can claim it; otherwise it stays own=1 forever and every
+      // same-direction transfer wedges. IN only: an IN issues just one token so the sibling
+      // was never put on the wire, whereas an OUT issues both tokens and its sibling may
+      // still be in flight - touching it there would race the SIE write-back.
+      if (TUSB_DIR_IN == dir_in) release_sibling_bd(s, &_hcd.pipe[pipenum]);
       suspend_transfer(pipenum, bd);
       next_pipenum = select_next_pipenum(pipenum);
       if (0 <= next_pipenum)
@@ -310,8 +313,9 @@ static void process_tokdne(uint8_t rhport)
   }
   _hcd.in_progress  &= ~TU_BIT(pipenum);
   pipe_state_t *pipe = &_hcd.pipe[ep->pipenum];
+  release_sibling_bd(s, pipe);
   hcd_event_xfer_complete(pipe->dev_addr,
-                          tu_edpt_addr(KHCI->TOKEN & USB_TOKEN_TOKENENDPT_MASK, dir_in),
+                          tu_edpt_addr(CI_REG->TOKEN & USB_TOKEN_TOKENENDPT_MASK, dir_in),
                           pipe->length - pipe->remaining,
                           result, true);
   next_pipenum = select_next_pipenum(pipenum);
@@ -321,29 +325,32 @@ static void process_tokdne(uint8_t rhport)
 
 static void process_attach(uint8_t rhport)
 {
-  unsigned ctl = KHCI->CTL;
+  unsigned ctl = CI_REG->CTL;
   if (!(ctl & USB_CTL_JSTATE_MASK)) {
     /* The attached device is a low speed device. */
-    KHCI->ADDR = USB_ADDR_LSEN_MASK;
-    KHCI->ENDPOINT[0].ENDPT = USB_ENDPT_HOSTWOHUB_MASK;
+    CI_REG->ADDR = USB_ADDR_LSEN_MASK;
+    CI_REG->EP[0].CTL = USB_ENDPT_HOSTWOHUB_MASK;
   }
   hcd_event_device_attach(rhport, true);
 }
 
 static void process_bus_reset(uint8_t rhport)
 {
-  KHCI->ISTAT    = USB_ISTAT_TOKDNE_MASK;
-  KHCI->USBCTRL &= ~USB_USBCTRL_SUSP_MASK;
-  KHCI->CTL     &= ~USB_CTL_USBENSOFEN_MASK;
-  KHCI->ADDR     = 0;
-  KHCI->ENDPOINT[0].ENDPT = 0;
+  CI_REG->INT_STAT = USB_ISTAT_TOKDNE_MASK;
+  CI_REG->USBCTRL &= ~USB_USBCTRL_SUSP_MASK;
+  CI_REG->CTL     &= ~USB_CTL_USBENSOFEN_MASK;
+  CI_REG->ADDR     = 0;
+  CI_REG->EP[0].CTL = 0;
 
   hcd_event_device_remove(rhport, true);
 
   _hcd.in_progress = 0;
   _hcd.pending     = 0;
+  // Clear the ENTIRE shared BDT (both directions, both even/odd). Clearing only the IN
+  // pair left a stale OUT/SETUP descriptor (own=1) after a disconnect mid-OUT, which then
+  // blocks the first control transfer on re-enumeration.
   buffer_descriptor_t *bd = &_hcd.bdt[0][0];
-  for (unsigned i = 0; i < 2; ++i, ++bd) {
+  for (unsigned i = 0; i < 2 * 2; ++i, ++bd) {
     bd->head = 0;
   }
 }
@@ -354,31 +361,31 @@ static void process_bus_reset(uint8_t rhport)
 bool hcd_init(uint8_t rhport, const tusb_rhport_init_t* rh_init) {
   (void) rhport;
   (void) rh_init;
-  KHCI->USBTRC0 |= USB_USBTRC0_USBRESET_MASK;
-  while (KHCI->USBTRC0 & USB_USBTRC0_USBRESET_MASK);
+  CI_REG->USBTRC0 |= USB_USBTRC0_USBRESET_MASK;
+  while (CI_REG->USBTRC0 & USB_USBTRC0_USBRESET_MASK);
 
   tu_memclr(&_hcd, sizeof(_hcd));
-  KHCI->USBTRC0 |= TU_BIT(6); /* software must set this bit to 1 */
-  KHCI->BDTPAGE1 = (uint8_t)((uintptr_t)_hcd.bdt >>  8);
-  KHCI->BDTPAGE2 = (uint8_t)((uintptr_t)_hcd.bdt >> 16);
-  KHCI->BDTPAGE3 = (uint8_t)((uintptr_t)_hcd.bdt >> 24);
+  CI_REG->USBTRC0 |= TU_BIT(6); /* software must set this bit to 1 */
+  CI_REG->BDT_PAGE1 = (uint8_t)((uintptr_t)_hcd.bdt >>  8);
+  CI_REG->BDT_PAGE2 = (uint8_t)((uintptr_t)_hcd.bdt >> 16);
+  CI_REG->BDT_PAGE3 = (uint8_t)((uintptr_t)_hcd.bdt >> 24);
 
-  KHCI->USBCTRL &= ~USB_USBCTRL_SUSP_MASK;
-  KHCI->CTL     |= USB_CTL_ODDRST_MASK;
+  CI_REG->USBCTRL &= ~USB_USBCTRL_SUSP_MASK;
+  CI_REG->CTL     |= USB_CTL_ODDRST_MASK;
   for (unsigned i = 0; i < 16; ++i) {
-    KHCI->ENDPOINT[i].ENDPT = 0;
+    CI_REG->EP[i].CTL = 0;
   }
-  KHCI->CTL &= ~USB_CTL_ODDRST_MASK;
+  CI_REG->CTL &= ~USB_CTL_ODDRST_MASK;
 
-  KHCI->SOFTHLD = 74; /* for 64-byte packets */
-  // KHCI->SOFTHLD = 144; /* for low speed 8-byte packets */
-  KHCI->CTL     = USB_CTL_HOSTMODEEN_MASK | USB_CTL_SE0_MASK;
-  KHCI->USBCTRL = USB_USBCTRL_PDE_MASK;
+  CI_REG->SOF_THLD = 74; /* for 64-byte packets */
+  // CI_REG->SOF_THLD = 144; /* for low speed 8-byte packets */
+  CI_REG->CTL     = USB_CTL_HOSTMODEEN_MASK | USB_CTL_SE0_MASK;
+  CI_REG->USBCTRL = USB_USBCTRL_PDE_MASK;
 
-  NVIC_ClearPendingIRQ(USB0_IRQn);
-  KHCI->INTEN = USB_INTEN_ATTACHEN_MASK | USB_INTEN_TOKDNEEN_MASK |
+  NVIC_ClearPendingIRQ(CI_FS_IRQN);
+  CI_REG->INT_EN = USB_INTEN_ATTACHEN_MASK | USB_INTEN_TOKDNEEN_MASK |
     USB_INTEN_USBRSTEN_MASK | USB_INTEN_ERROREN_MASK | USB_INTEN_STALLEN_MASK;
-  KHCI->ERREN = 0xff;
+  CI_REG->ERR_ENB = 0xff;
 
   return true;
 }
@@ -386,13 +393,13 @@ bool hcd_init(uint8_t rhport, const tusb_rhport_init_t* rh_init) {
 void hcd_int_enable(uint8_t rhport)
 {
   (void)rhport;
-  NVIC_EnableIRQ(USB0_IRQn);
+  NVIC_EnableIRQ(CI_FS_IRQN);
 }
 
 void hcd_int_disable(uint8_t rhport)
 {
   (void)rhport;
-  NVIC_DisableIRQ(USB0_IRQn);
+  NVIC_DisableIRQ(CI_FS_IRQN);
 }
 
 uint32_t hcd_frame_number(uint8_t rhport)
@@ -401,8 +408,8 @@ uint32_t hcd_frame_number(uint8_t rhport)
   /* The device must be reset at least once after connection
    * in order to start the frame counter. */
   if (_hcd.need_reset) hcd_port_reset(rhport);
-  uint32_t frmnum = KHCI->FRMNUML;
-  frmnum |= KHCI->FRMNUMH << 8u;
+  uint32_t frmnum = CI_REG->FRM_NUML;
+  frmnum |= CI_REG->FRM_NUMH << 8u;
    return frmnum;
 }
 
@@ -412,7 +419,7 @@ uint32_t hcd_frame_number(uint8_t rhport)
 bool hcd_port_connect_status(uint8_t rhport)
 {
   (void)rhport;
-  if (KHCI->ISTAT & USB_ISTAT_ATTACH_MASK)
+  if (CI_REG->INT_STAT & USB_ISTAT_ATTACH_MASK)
     return true;
   return false;
 }
@@ -420,12 +427,12 @@ bool hcd_port_connect_status(uint8_t rhport)
 void hcd_port_reset(uint8_t rhport)
 {
   (void)rhport;
-  KHCI->CTL &= ~USB_CTL_USBENSOFEN_MASK;
-  KHCI->CTL |= USB_CTL_RESET_MASK;
+  CI_REG->CTL &= ~USB_CTL_USBENSOFEN_MASK;
+  CI_REG->CTL |= USB_CTL_RESET_MASK;
   unsigned cnt = SystemCoreClock / 100;
   while (cnt--) __NOP();
-  KHCI->CTL &= ~USB_CTL_RESET_MASK;
-  KHCI->CTL |= USB_CTL_USBENSOFEN_MASK;
+  CI_REG->CTL &= ~USB_CTL_RESET_MASK;
+  CI_REG->CTL |= USB_CTL_USBENSOFEN_MASK;
   _hcd.need_reset = false;
 }
 
@@ -437,26 +444,26 @@ tusb_speed_t hcd_port_speed_get(uint8_t rhport)
 {
   (void)rhport;
   tusb_speed_t speed = TUSB_SPEED_FULL;
-  const unsigned ie = NVIC_GetEnableIRQ(USB0_IRQn);
-  NVIC_DisableIRQ(USB0_IRQn);
-  if (KHCI->ADDR & USB_ADDR_LSEN_MASK)
+  const unsigned ie = NVIC_GetEnableIRQ(CI_FS_IRQN);
+  NVIC_DisableIRQ(CI_FS_IRQN);
+  if (CI_REG->ADDR & USB_ADDR_LSEN_MASK)
     speed = TUSB_SPEED_LOW;
-  if (ie) NVIC_EnableIRQ(USB0_IRQn);
+  if (ie) NVIC_EnableIRQ(CI_FS_IRQN);
   return speed;
 }
 
 void hcd_device_close(uint8_t rhport, uint8_t dev_addr)
 {
   (void)rhport;
-  const unsigned ie = NVIC_GetEnableIRQ(USB0_IRQn);
-  NVIC_DisableIRQ(USB0_IRQn);
+  const unsigned ie = NVIC_GetEnableIRQ(CI_FS_IRQN);
+  NVIC_DisableIRQ(CI_FS_IRQN);
   pipe_state_t *p   = &_hcd.pipe[0];
   pipe_state_t *end = &_hcd.pipe[CFG_TUH_ENDPOINT_MAX * 2];
   for (;p != end; ++p) {
     if (p->dev_addr == dev_addr)
       tu_memclr(p, sizeof(*p));
   }
-  if (ie) NVIC_EnableIRQ(USB0_IRQn);
+  if (ie) NVIC_EnableIRQ(CI_FS_IRQN);
 }
 
 //--------------------------------------------------------------------+
@@ -483,12 +490,12 @@ bool hcd_setup_send(uint8_t rhport, uint8_t dev_addr, uint8_t const setup_packet
 
   _hcd.in_progress |= TU_BIT(pipenum);
 
-  unsigned hostwohub = KHCI->ENDPOINT[0].ENDPT & USB_ENDPT_HOSTWOHUB_MASK;
-  KHCI->ENDPOINT[0].ENDPT = hostwohub |
+  unsigned hostwohub = CI_REG->EP[0].CTL & USB_ENDPT_HOSTWOHUB_MASK;
+  CI_REG->EP[0].CTL = hostwohub |
     USB_ENDPT_EPHSHK_MASK | USB_ENDPT_EPRXEN_MASK | USB_ENDPT_EPTXEN_MASK;
-  KHCI->ADDR  = (KHCI->ADDR & USB_ADDR_LSEN_MASK) | dev_addr;
-  while (KHCI->CTL & USB_CTL_TXSUSPENDTOKENBUSY_MASK) ;
-  KHCI->TOKEN = (TOK_PID_SETUP << USB_TOKEN_TOKENPID_SHIFT);
+  CI_REG->ADDR  = (CI_REG->ADDR & USB_ADDR_LSEN_MASK) | dev_addr;
+  while (CI_REG->CTL & USB_CTL_TXSUSPENDTOKENBUSY_MASK) ;
+  CI_REG->TOKEN = (TOK_PID_SETUP << USB_TOKEN_TOKENPID_SHIFT);
   return true;
 }
 
@@ -540,16 +547,16 @@ bool hcd_edpt_xfer(uint8_t rhport, uint8_t dev_addr, uint8_t ep_addr, uint8_t * 
   TU_ASSERT(0 <= pipenum);
 
   TU_ASSERT(0 == (_hcd.in_progress & TU_BIT(pipenum)));
-  unsigned const ie  = NVIC_GetEnableIRQ(USB0_IRQn);
-  NVIC_DisableIRQ(USB0_IRQn);
+  unsigned const ie  = NVIC_GetEnableIRQ(CI_FS_IRQN);
+  NVIC_DisableIRQ(CI_FS_IRQN);
   pipe_state_t *pipe = &_hcd.pipe[pipenum];
   pipe->buffer       = buffer;
   pipe->length       = buflen;
   pipe->remaining    = buflen;
   _hcd.in_progress  |= TU_BIT(pipenum);
   _hcd.pending      |= TU_BIT(pipenum); /* Send at the next Frame */
-  KHCI->INTEN |= USB_ISTAT_SOFTOK_MASK;
-  if (ie) NVIC_EnableIRQ(USB0_IRQn);
+  CI_REG->INT_EN |= USB_ISTAT_SOFTOK_MASK;
+  if (ie) NVIC_EnableIRQ(CI_FS_IRQN);
   return true;
 }
 
@@ -577,42 +584,42 @@ bool hcd_edpt_clear_stall(uint8_t rhport, uint8_t dev_addr, uint8_t ep_addr) {
 void hcd_int_handler(uint8_t rhport, bool in_isr)
 {
   (void) in_isr;
-  uint32_t is  = KHCI->ISTAT;
-  uint32_t msk = KHCI->INTEN;
+  uint32_t is  = CI_REG->INT_STAT;
+  uint32_t msk = CI_REG->INT_EN;
 
   // TU_LOG1("S %lx\r\n", is);
 
   /* clear disabled interrupts */
-  KHCI->ISTAT = (is & ~msk & ~USB_ISTAT_TOKDNE_MASK) | USB_ISTAT_SOFTOK_MASK;
+  CI_REG->INT_STAT = (is & ~msk & ~USB_ISTAT_TOKDNE_MASK) | USB_ISTAT_SOFTOK_MASK;
   is &= msk;
 
   if (is & USB_ISTAT_ERROR_MASK) {
-    unsigned err = KHCI->ERRSTAT;
+    unsigned err = CI_REG->ERR_STAT;
     if (err) {
       TU_LOG1(" ERR %x\r\n", err);
-      KHCI->ERRSTAT = err;
+      CI_REG->ERR_STAT = err;
     } else {
-      KHCI->INTEN &= ~USB_ISTAT_ERROR_MASK;
+      CI_REG->INT_EN &= ~USB_ISTAT_ERROR_MASK;
     }
   }
 
   if (is & USB_ISTAT_USBRST_MASK) {
-    KHCI->INTEN = (msk & ~USB_INTEN_USBRSTEN_MASK) | USB_INTEN_ATTACHEN_MASK;
+    CI_REG->INT_EN = (msk & ~USB_INTEN_USBRSTEN_MASK) | USB_INTEN_ATTACHEN_MASK;
     process_bus_reset(rhport);
     return;
   }
   if (is & USB_ISTAT_ATTACH_MASK) {
-    KHCI->INTEN = (msk & ~USB_INTEN_ATTACHEN_MASK) | USB_INTEN_USBRSTEN_MASK;
+    CI_REG->INT_EN = (msk & ~USB_INTEN_ATTACHEN_MASK) | USB_INTEN_USBRSTEN_MASK;
     _hcd.need_reset = true;
     process_attach(rhport);
     return;
   }
   if (is & USB_ISTAT_STALL_MASK) {
-    KHCI->ISTAT = USB_ISTAT_STALL_MASK;
+    CI_REG->INT_STAT = USB_ISTAT_STALL_MASK;
   }
   if (is & USB_ISTAT_SOFTOK_MASK) {
     msk &= ~USB_ISTAT_SOFTOK_MASK;
-    KHCI->INTEN = msk;
+    CI_REG->INT_EN = msk;
     if (_hcd.pending) {
       int pipenum = __builtin_ctz(_hcd.pending);
       _hcd.pending = 0;
