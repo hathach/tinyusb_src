@@ -240,6 +240,16 @@
 #define OPT_MODE_SPEED_MASK     0xff00u
 
 //--------------------------------------------------------------------+
+// Validation Level
+// Optional validation of data received from the USB peer, traded against code size. Coverage is parser-specific
+// and expanded incrementally. CFG_TUSB_VALIDATION_LEVEL sets the default for both device and host; use the
+// CFG_TUD_VALIDATION_LEVEL / CFG_TUH_VALIDATION_LEVEL overrides when the roles need different policies.
+//--------------------------------------------------------------------+
+#define TUSB_VALIDATION_NONE   0 ///< trusted peers, minimal code size
+#define TUSB_VALIDATION_BASIC  1 ///< structural memory-safety checks where supported
+#define TUSB_VALIDATION_STRICT 2 ///< additional USB and class-specific conformance checks
+
+//--------------------------------------------------------------------+
 // Include tusb_config.h
 //--------------------------------------------------------------------+
 
@@ -251,6 +261,46 @@
 #endif
 
 #include "common/tusb_mcu.h"
+
+//--------------------------------------------------------------------+
+// Validation Options
+//--------------------------------------------------------------------+
+
+#ifndef CFG_TUSB_VALIDATION_LEVEL
+  #define CFG_TUSB_VALIDATION_LEVEL TUSB_VALIDATION_BASIC
+#endif
+
+#ifndef CFG_TUD_VALIDATION_LEVEL
+  #define CFG_TUD_VALIDATION_LEVEL CFG_TUSB_VALIDATION_LEVEL
+#endif
+
+#ifndef CFG_TUH_VALIDATION_LEVEL
+  #define CFG_TUH_VALIDATION_LEVEL CFG_TUSB_VALIDATION_LEVEL
+#endif
+
+#if (CFG_TUSB_VALIDATION_LEVEL < TUSB_VALIDATION_NONE) || \
+    (CFG_TUSB_VALIDATION_LEVEL > TUSB_VALIDATION_STRICT)
+  #error "CFG_TUSB_VALIDATION_LEVEL must be TUSB_VALIDATION_NONE, TUSB_VALIDATION_BASIC, or TUSB_VALIDATION_STRICT"
+#endif
+
+#if (CFG_TUD_VALIDATION_LEVEL < TUSB_VALIDATION_NONE) || \
+    (CFG_TUD_VALIDATION_LEVEL > TUSB_VALIDATION_STRICT)
+  #error "CFG_TUD_VALIDATION_LEVEL must be TUSB_VALIDATION_NONE, TUSB_VALIDATION_BASIC, or TUSB_VALIDATION_STRICT"
+#endif
+
+#if (CFG_TUH_VALIDATION_LEVEL < TUSB_VALIDATION_NONE) || \
+    (CFG_TUH_VALIDATION_LEVEL > TUSB_VALIDATION_STRICT)
+  #error "CFG_TUH_VALIDATION_LEVEL must be TUSB_VALIDATION_NONE, TUSB_VALIDATION_BASIC, or TUSB_VALIDATION_STRICT"
+#endif
+
+// Validation conditions are short-circuited at lower levels and compile out when the result is unused.
+#define TUD_VALIDATION_CHECK(_level, _cond) ((CFG_TUD_VALIDATION_LEVEL < (_level)) || (_cond))
+#define TUH_VALIDATION_CHECK(_level, _cond) ((CFG_TUH_VALIDATION_LEVEL < (_level)) || (_cond))
+
+#define TUD_VALIDATE_BASIC(_cond) TUD_VALIDATION_CHECK(TUSB_VALIDATION_BASIC, _cond)
+#define TUH_VALIDATE_BASIC(_cond) TUH_VALIDATION_CHECK(TUSB_VALIDATION_BASIC, _cond)
+#define TUD_VALIDATE_STRICT(_cond) TUD_VALIDATION_CHECK(TUSB_VALIDATION_STRICT, _cond)
+#define TUH_VALIDATE_STRICT(_cond) TUH_VALIDATION_CHECK(TUSB_VALIDATION_STRICT, _cond)
 
 //--------------------------------------------------------------------+
 // USBIP
@@ -694,6 +744,7 @@
   #ifndef CFG_TUH_ENUMERATION_BUFSIZE
     #define CFG_TUH_ENUMERATION_BUFSIZE 256
   #endif
+
 #endif // CFG_TUH_ENABLED
 
 // Attribute to place data in accessible RAM for host controller (default: CFG_TUSB_MEM_SECTION)
