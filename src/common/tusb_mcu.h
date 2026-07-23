@@ -716,6 +716,14 @@
   // Possible to share IN/OUT if only one direction is armed at any one time
   #define CFG_TUD_ENDPOINT_ONE_DIRECTION_ONLY 1
 
+//--------------------------------------------------------------------+
+// Geehy
+//--------------------------------------------------------------------+
+#elif TU_CHECK_MCU(OPT_MCU_APM32F0XX)
+  #define TUP_USBIP_FSDEV
+  #define TUP_USBIP_FSDEV_APM32
+  #define CFG_TUSB_FSDEV_PMA_SIZE 1024u
+
 #endif
 
 // External USB controller
